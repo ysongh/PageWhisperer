@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-PageWhisperer is a Chrome Extension built with React, TypeScript, and Vite (Manifest V3). It reads and displays content (title, URL, body text) from the user's active browser tab.
+PageWhisperer is a Chrome Extension built with React, TypeScript, and Vite (Manifest V3). It reads content from the user's active browser tab and summarizes it using either cloud LLM APIs (Gemini, Claude, ChatGPT) or a local in-browser model via WebGPU (@mlc-ai/web-llm).
 
 ## Tech Stack
 
@@ -11,7 +11,9 @@ PageWhisperer is a Chrome Extension built with React, TypeScript, and Vite (Mani
 - **Bundler:** Vite 7
 - **Package Manager:** pnpm
 - **Linting:** ESLint with TypeScript and React plugins
-- **Chrome APIs:** `chrome.tabs`, `chrome.scripting` (Manifest V3)
+- **Chrome APIs:** `chrome.tabs`, `chrome.scripting`, `chrome.storage` (Manifest V3)
+- **Local LLM:** `@mlc-ai/web-llm` for in-browser inference via WebGPU
+- **Cloud LLMs:** Google Gemini, Anthropic Claude, OpenAI ChatGPT (via REST APIs)
 - **Types:** `@types/chrome` for Chrome extension API typings
 
 ## Common Commands
@@ -25,7 +27,12 @@ PageWhisperer is a Chrome Extension built with React, TypeScript, and Vite (Mani
 ## Project Structure
 
 - `public/manifest.json` — Chrome Extension manifest (v3)
-- `src/` — React application source
+- `src/App.tsx` — main UI component (state management and rendering)
+- `src/lib/constants.ts` — provider/model definitions, types, system prompt
+- `src/lib/storage.ts` — chrome.storage.local wrappers for persisting state
+- `src/lib/pageExtractor.ts` — extracts page content from the active tab
+- `src/lib/cloudProviders.ts` — cloud LLM summarization (Gemini, Claude, ChatGPT)
+- `src/lib/localModel.ts` — local LLM loading and summarization via web-llm
 - `dist/` — build output (load this folder as unpacked extension in Chrome)
 - `vite.config.ts` — Vite config with stable filenames for extension compatibility
 
