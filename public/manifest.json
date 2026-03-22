@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "My React Extension",
+  "name": "PageWhisperer",
   "version": "1.0.0",
-  "description": "A minimal browser extension built with React, Vite, and TypeScript",
+  "description": "Read and display content from the current page",
   "action": {
     "default_popup": "index.html",
     "default_icon": {
@@ -10,9 +10,10 @@
       "48": "icon48.png",
       "128": "icon128.png"
     },
-    "default_title": "My React Extension"
+    "default_title": "PageWhisperer"
   },
   "permissions": [
-    "activeTab"
+    "activeTab",
+    "scripting"
   ]
 }
