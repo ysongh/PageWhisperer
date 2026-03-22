@@ -1,21 +1,33 @@
 import { SYSTEM_PROMPT, type CloudProviderId } from "./constants";
+import type { ArticleBiasReport } from "./types";
 
-export async function summarizeWithCloud(
+export async function analyzeWithCloud(
   provider: CloudProviderId,
   apiKey: string,
   content: string
-): Promise<string> {
+): Promise<ArticleBiasReport> {
+  let raw: string;
   switch (provider) {
     case "gemini":
-      return summarizeWithGemini(apiKey, content);
+      raw = await callGemini(apiKey, content);
+      break;
     case "claude":
-      return summarizeWithClaude(apiKey, content);
+      raw = await callClaude(apiKey, content);
+      break;
     case "chatgpt":
-      return summarizeWithChatGPT(apiKey, content);
+      raw = await callChatGPT(apiKey, content);
+      break;
   }
+  return parseReport(raw);
 }
 
-async function summarizeWithGemini(apiKey: string, content: string): Promise<string> {
+function parseReport(raw: string): ArticleBiasReport {
+  // Strip markdown code fences if present
+  const cleaned = raw.replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/i, "").trim();
+  return JSON.parse(cleaned) as ArticleBiasReport;
+}
+
+async function callGemini(apiKey: string, content: string): Promise<string> {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
     {
@@ -29,10 +41,10 @@ async function summarizeWithGemini(apiKey: string, content: string): Promise<str
   );
   if (!res.ok) throw new Error(`Gemini API error: ${res.status} ${await res.text()}`);
   const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "No summary generated.";
+  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
 }
 
-async function summarizeWithClaude(apiKey: string, content: string): Promise<string> {
+async function callClaude(apiKey: string, content: string): Promise<string> {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
     headers: {
@@ -50,10 +62,10 @@ async function summarizeWithClaude(apiKey: string, content: string): Promise<str
   });
   if (!res.ok) throw new Error(`Claude API error: ${res.status} ${await res.text()}`);
   const data = await res.json();
-  return data.content?.[0]?.text ?? "No summary generated.";
+  return data.content?.[0]?.text ?? "";
 }
 
-async function summarizeWithChatGPT(apiKey: string, content: string): Promise<string> {
+async function callChatGPT(apiKey: string, content: string): Promise<string> {
   const res = await fetch("https://api.openai.com/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -70,5 +82,5 @@ async function summarizeWithChatGPT(apiKey: string, content: string): Promise<st
   });
   if (!res.ok) throw new Error(`ChatGPT API error: ${res.status} ${await res.text()}`);
   const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "No summary generated.";
+  return data.choices?.[0]?.message?.content ?? "";
 }

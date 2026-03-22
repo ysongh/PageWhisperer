@@ -8,11 +8,31 @@ import {
 } from "./lib/constants";
 import { loadState, saveState } from "./lib/storage";
 import { extractPageContent } from "./lib/pageExtractor";
-import { summarizeWithCloud } from "./lib/cloudProviders";
-import { loadLocalModel, summarizeWithLocal, type MLCEngine } from "./lib/localModel";
+import { analyzeWithCloud } from "./lib/cloudProviders";
+import { loadLocalModel, analyzeWithLocal, type MLCEngine } from "./lib/localModel";
+import type { ArticleBiasReport } from "./lib/types";
+
+type Tab = "summary" | "coverage" | "history";
+
+const LEAN_LABELS: Record<string, string> = {
+  "far-left": "Far left",
+  "lean-left": "Lean left",
+  "center": "Center",
+  "lean-right": "Lean right",
+  "far-right": "Far right",
+};
+
+const BIAS_DIMENSION_LABELS: { key: keyof ArticleBiasReport["biasDimensions"]; label: string }[] = [
+  { key: "emotionalTone", label: "Emotional tone" },
+  { key: "sourceDiversity", label: "Source diversity" },
+  { key: "framing", label: "Framing" },
+  { key: "omissionRisk", label: "Omission risk" },
+  { key: "factualGrounding", label: "Factual grounding" },
+];
 
 function App() {
   const [providerMode, setProviderMode] = useState<ProviderMode>("local");
+  const [activeTab, setActiveTab] = useState<Tab>("summary");
 
   // Cloud state
   const [selectedCloud, setSelectedCloud] = useState<CloudProviderId>("gemini");
@@ -32,13 +52,11 @@ function App() {
   const engineRef = useRef<MLCEngine | null>(null);
 
   // Shared state
-  const [pageContent, setPageContent] = useState<string | null>(null);
-  const [summary, setSummary] = useState<string | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [summarizing, setSummarizing] = useState(false);
+  const [report, setReport] = useState<ArticleBiasReport | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [showSettings, setShowSettings] = useState(false);
 
-  // Load persisted state
   useEffect(() => {
     loadState().then((state) => {
       if (state.providerMode) setProviderMode(state.providerMode);
@@ -48,15 +66,13 @@ function App() {
     });
   }, []);
 
-  // --- Mode switching ---
+  // --- Mode & provider handlers ---
 
   const handleModeChange = (mode: ProviderMode) => {
     setProviderMode(mode);
     saveState({ providerMode: mode });
     setShowKeyInput(false);
   };
-
-  // --- Cloud handlers ---
 
   const handleCloudChange = (id: CloudProviderId) => {
     setSelectedCloud(id);
@@ -78,8 +94,6 @@ function App() {
     setKeyDraft("");
     setShowKeyInput(false);
   };
-
-  // --- Local handlers ---
 
   const handleLocalChange = (id: LocalModelId) => {
     setSelectedLocal(id);
@@ -108,219 +122,338 @@ function App() {
     }
   };
 
-  // --- Page extraction ---
+  // --- Analyze page ---
 
-  const handleExtractPage = async () => {
-    setLoading(true);
+  const handleAnalyze = async () => {
+    setAnalyzing(true);
     setError(null);
-    setPageContent(null);
-    setSummary(null);
-    try {
-      const data = await extractPageContent();
-      setPageContent(`Title: ${data.title}\nURL: ${data.url}\n\n${data.text}`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to read page content.");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // --- Summarize ---
-
-  const handleSummarize = async () => {
-    if (!pageContent) return;
-    setSummarizing(true);
-    setError(null);
-    setSummary(null);
-
-    const truncated = pageContent.slice(0, 4000);
+    setReport(null);
 
     try {
-      let result: string;
+      const pageData = await extractPageContent();
+      const content = `Title: ${pageData.title}\nURL: ${pageData.url}\n\n${pageData.text}`;
+      const truncated = content.slice(0, 4000);
+
+      let result: ArticleBiasReport;
 
       if (providerMode === "cloud") {
         const key = apiKeys[selectedCloud];
         if (!key) {
           setShowKeyInput(true);
+          setShowSettings(true);
           setError(`Please enter your API key for ${CLOUD_PROVIDERS.find((p) => p.id === selectedCloud)?.label}.`);
-          setSummarizing(false);
+          setAnalyzing(false);
           return;
         }
-        result = await summarizeWithCloud(selectedCloud, key, truncated);
+        result = await analyzeWithCloud(selectedCloud, key, truncated);
       } else {
         if (!engineRef.current) {
           setError("Please load a local model first.");
-          setSummarizing(false);
+          setShowSettings(true);
+          setAnalyzing(false);
           return;
         }
-        result = await summarizeWithLocal(engineRef.current, truncated);
+        result = await analyzeWithLocal(engineRef.current, truncated);
       }
 
-      setSummary(result);
+      setReport(result);
+      setActiveTab("summary");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to summarize content.");
+      setError(err instanceof Error ? err.message : "Failed to analyze page content.");
     } finally {
-      setSummarizing(false);
+      setAnalyzing(false);
     }
   };
 
-  const canSummarize =
+  const canAnalyze =
     providerMode === "cloud"
-      ? !!pageContent && !!apiKeys[selectedCloud]
-      : !!pageContent && modelReady;
+      ? !!apiKeys[selectedCloud]
+      : modelReady;
 
   const currentCloudLabel = CLOUD_PROVIDERS.find((p) => p.id === selectedCloud)?.label ?? "";
   const currentLocalLabel = LOCAL_MODELS.find((m) => m.id === selectedLocal)?.label ?? "";
 
+  // --- Render ---
+
   return (
-    <div style={{ width: 420, height: 550, padding: 16, overflow: "hidden", display: "flex", flexDirection: "column", fontFamily: "system-ui, sans-serif" }}>
-      <h1 style={{ fontSize: 18, margin: "0 0 12px" }}>PageWhisperer</h1>
+    <div style={{ width: 380, minHeight: 500, fontFamily: "system-ui, -apple-system, sans-serif", background: "#fff", display: "flex", flexDirection: "column" }}>
 
-      {/* Mode Toggle */}
-      <div style={{ display: "flex", gap: 0, marginBottom: 10 }}>
-        {(["cloud", "local"] as const).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => handleModeChange(mode)}
-            style={{
-              flex: 1,
-              padding: "7px 0",
-              fontSize: 13,
-              fontWeight: providerMode === mode ? 700 : 400,
-              background: providerMode === mode ? "#1976d2" : "#eee",
-              color: providerMode === mode ? "#fff" : "#333",
-              border: "1px solid #ccc",
-              cursor: "pointer",
-              borderRadius: mode === "cloud" ? "4px 0 0 4px" : "0 4px 4px 0",
-            }}
-          >
-            {mode === "cloud" ? "Cloud API" : "Local (WebGPU)"}
-          </button>
-        ))}
+      {/* Header */}
+      <div style={{ padding: "14px 16px 10px", borderBottom: "1px solid #eee", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <h1 style={{ fontSize: 16, margin: 0, fontWeight: 700 }}>PageWhisperer</h1>
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          style={{ background: "none", border: "none", cursor: "pointer", fontSize: 18, padding: "2px 6px", color: "#666" }}
+          title="Settings"
+        >
+          {showSettings ? "\u2715" : "\u2699"}
+        </button>
       </div>
 
-      {/* Cloud Provider Section */}
-      {providerMode === "cloud" && (
-        <fieldset style={{ border: "1px solid #ccc", borderRadius: 4, padding: "8px 12px", margin: "0 0 10px" }}>
-          <legend style={{ fontSize: 13, fontWeight: 600 }}>Cloud Provider</legend>
-          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {CLOUD_PROVIDERS.map((provider) => (
-              <label key={provider.id} style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 13 }}>
-                <input
-                  type="radio"
-                  name="cloud-provider"
-                  value={provider.id}
-                  checked={selectedCloud === provider.id}
-                  onChange={() => handleCloudChange(provider.id)}
-                />
-                {provider.label}
-                {selectedCloud === provider.id && apiKeys[provider.id] && (
-                  <span style={{ color: "green", fontSize: 11 }}>(active)</span>
-                )}
-                {selectedCloud === provider.id && !apiKeys[provider.id] && (
-                  <span style={{ color: "orange", fontSize: 11 }}>(no key)</span>
-                )}
-              </label>
+      {/* Settings Panel */}
+      {showSettings && (
+        <div style={{ padding: "10px 16px", borderBottom: "1px solid #eee", background: "#fafafa" }}>
+          {/* Mode Toggle */}
+          <div style={{ display: "flex", gap: 0, marginBottom: 10 }}>
+            {(["cloud", "local"] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => handleModeChange(mode)}
+                style={{
+                  flex: 1, padding: "6px 0", fontSize: 12, fontWeight: providerMode === mode ? 700 : 400,
+                  background: providerMode === mode ? "#1976d2" : "#eee", color: providerMode === mode ? "#fff" : "#333",
+                  border: "1px solid #ccc", cursor: "pointer",
+                  borderRadius: mode === "cloud" ? "4px 0 0 4px" : "0 4px 4px 0",
+                }}
+              >
+                {mode === "cloud" ? "Cloud API" : "Local (WebGPU)"}
+              </button>
             ))}
           </div>
 
-          {showKeyInput && (
-            <div style={{ marginTop: 8, padding: 8, background: "#fff8e1", borderRadius: 4, border: "1px solid #ffe082" }}>
-              <p style={{ margin: "0 0 6px", fontSize: 12 }}>
-                Enter API key for <strong>{currentCloudLabel}</strong>:
-              </p>
-              <div style={{ display: "flex", gap: 6 }}>
-                <input
-                  type="password"
-                  value={keyDraft}
-                  onChange={(e) => setKeyDraft(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && saveApiKey()}
-                  placeholder="Paste API key here"
-                  style={{ flex: 1, padding: "5px 8px", fontSize: 12, borderRadius: 4, border: "1px solid #ccc" }}
-                />
-                <button onClick={saveApiKey} style={{ padding: "5px 10px", fontSize: 12 }}>Save</button>
+          {providerMode === "cloud" && (
+            <>
+              <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                {CLOUD_PROVIDERS.map((p) => (
+                  <label key={p.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, cursor: "pointer" }}>
+                    <input type="radio" name="cloud" checked={selectedCloud === p.id} onChange={() => handleCloudChange(p.id)} />
+                    {p.label}
+                    {selectedCloud === p.id && (
+                      <span style={{ fontSize: 10, color: apiKeys[p.id] ? "green" : "orange" }}>
+                        ({apiKeys[p.id] ? "active" : "no key"})
+                      </span>
+                    )}
+                  </label>
+                ))}
               </div>
-            </div>
+              {showKeyInput && (
+                <div style={{ marginTop: 8, padding: 8, background: "#fff8e1", borderRadius: 4, border: "1px solid #ffe082" }}>
+                  <p style={{ margin: "0 0 6px", fontSize: 11 }}>API key for <strong>{currentCloudLabel}</strong>:</p>
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <input type="password" value={keyDraft} onChange={(e) => setKeyDraft(e.target.value)} onKeyDown={(e) => e.key === "Enter" && saveApiKey()} placeholder="Paste API key" style={{ flex: 1, padding: "4px 6px", fontSize: 11, borderRadius: 3, border: "1px solid #ccc" }} />
+                    <button onClick={saveApiKey} style={{ padding: "4px 8px", fontSize: 11 }}>Save</button>
+                  </div>
+                </div>
+              )}
+              {apiKeys[selectedCloud] && !showKeyInput && (
+                <button onClick={() => { setKeyDraft(""); setShowKeyInput(true); }} style={{ marginTop: 6, padding: "2px 6px", fontSize: 10, cursor: "pointer" }}>
+                  Update {currentCloudLabel} Key
+                </button>
+              )}
+            </>
           )}
 
-          {apiKeys[selectedCloud] && !showKeyInput && (
-            <button
-              onClick={() => { setKeyDraft(""); setShowKeyInput(true); }}
-              style={{ marginTop: 8, padding: "3px 8px", fontSize: 11, cursor: "pointer" }}
-            >
-              Update {currentCloudLabel} Key
-            </button>
+          {providerMode === "local" && (
+            <>
+              <select value={selectedLocal} onChange={(e) => handleLocalChange(e.target.value as LocalModelId)} style={{ width: "100%", padding: "5px 6px", fontSize: 12, borderRadius: 3, border: "1px solid #ccc" }}>
+                {LOCAL_MODELS.map((m) => <option key={m.id} value={m.id}>{m.label}</option>)}
+              </select>
+              <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}>
+                <button onClick={handleLoadModel} disabled={loadingModel || modelReady} style={{ padding: "4px 10px", fontSize: 12, cursor: loadingModel || modelReady ? "default" : "pointer" }}>
+                  {modelReady ? `${currentLocalLabel} Loaded` : loadingModel ? "Loading..." : "Load Model"}
+                </button>
+                {modelReady && <span style={{ color: "green", fontSize: 11 }}>Ready</span>}
+              </div>
+              {modelStatus && !modelReady && <p style={{ margin: "4px 0 0", fontSize: 10, color: "#666" }}>{modelStatus}</p>}
+            </>
           )}
-        </fieldset>
-      )}
-
-      {/* Local Model Section */}
-      {providerMode === "local" && (
-        <fieldset style={{ border: "1px solid #ccc", borderRadius: 4, padding: "8px 12px", margin: "0 0 10px" }}>
-          <legend style={{ fontSize: 13, fontWeight: 600 }}>Local LLM Model</legend>
-          <select
-            value={selectedLocal}
-            onChange={(e) => handleLocalChange(e.target.value as LocalModelId)}
-            style={{ width: "100%", padding: "6px 8px", fontSize: 13, borderRadius: 4, border: "1px solid #ccc" }}
-          >
-            {LOCAL_MODELS.map((model) => (
-              <option key={model.id} value={model.id}>{model.label}</option>
-            ))}
-          </select>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
-            <button
-              onClick={handleLoadModel}
-              disabled={loadingModel || modelReady}
-              style={{ padding: "6px 14px", fontSize: 13, cursor: loadingModel || modelReady ? "default" : "pointer" }}
-            >
-              {modelReady ? `${currentLocalLabel} Loaded` : loadingModel ? "Loading..." : "Load Model"}
-            </button>
-            {modelReady && <span style={{ color: "green", fontSize: 12 }}>Ready</span>}
-          </div>
-          {modelStatus && !modelReady && (
-            <p style={{ margin: "6px 0 0", fontSize: 11, color: "#666" }}>{modelStatus}</p>
-          )}
-        </fieldset>
-      )}
-
-      {/* Actions */}
-      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
-        <button
-          onClick={handleExtractPage}
-          disabled={loading}
-          style={{ flex: 1, padding: "8px 12px", fontSize: 13, cursor: loading ? "wait" : "pointer" }}
-        >
-          {loading ? "Reading..." : "Read Page"}
-        </button>
-        <button
-          onClick={handleSummarize}
-          disabled={!canSummarize || summarizing}
-          style={{ flex: 1, padding: "8px 12px", fontSize: 13, cursor: !canSummarize || summarizing ? "default" : "pointer" }}
-        >
-          {summarizing ? "Summarizing..." : "Summarize"}
-        </button>
-      </div>
-
-      {error && <p style={{ color: "red", margin: "0 0 8px", fontSize: 13 }}>{error}</p>}
-
-      {summary && (
-        <div style={{ marginBottom: 8 }}>
-          <h3 style={{ fontSize: 14, margin: "0 0 6px" }}>Summary</h3>
-          <div style={{ background: "#e8f5e9", padding: 10, borderRadius: 4, fontSize: 13, maxHeight: 160, overflow: "auto", whiteSpace: "pre-wrap" }}>
-            {summary}
-          </div>
         </div>
       )}
 
-      {pageContent && (
-        <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-          <h3 style={{ fontSize: 14, margin: "0 0 6px" }}>Page Content</h3>
-          <pre style={{ flex: 1, overflow: "auto", whiteSpace: "pre-wrap", wordBreak: "break-word", background: "#f5f5f5", padding: 10, borderRadius: 4, fontSize: 12, margin: 0 }}>
-            {pageContent}
-          </pre>
+      {/* Analyze Button */}
+      <div style={{ padding: "10px 16px" }}>
+        <button
+          onClick={handleAnalyze}
+          disabled={!canAnalyze || analyzing}
+          style={{
+            width: "100%", padding: "10px 0", fontSize: 14, fontWeight: 600,
+            background: canAnalyze && !analyzing ? "#1976d2" : "#ccc",
+            color: "#fff", border: "none", borderRadius: 6, cursor: canAnalyze && !analyzing ? "pointer" : "default",
+          }}
+        >
+          {analyzing ? "Analyzing..." : "Analyze This Page"}
+        </button>
+        {error && <p style={{ color: "red", margin: "8px 0 0", fontSize: 12 }}>{error}</p>}
+      </div>
+
+      {/* Report */}
+      {report && (
+        <div style={{ flex: 1, overflow: "auto", display: "flex", flexDirection: "column" }}>
+
+          {/* Outlet Header */}
+          <div style={{ padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, borderBottom: "1px solid #eee" }}>
+            <div style={{ width: 36, height: 36, borderRadius: 4, background: "#f0f0f0", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, fontWeight: 700, color: "#555", flexShrink: 0 }}>
+              {report.outlet.outlet.slice(0, 3).toUpperCase()}
+            </div>
+            <div>
+              <div style={{ fontSize: 14, fontWeight: 700 }}>{report.outlet.outlet}</div>
+              <div style={{ fontSize: 11, color: "#888" }}>
+                {LEAN_LABELS[report.outlet.lean] ?? report.outlet.lean} / Allsides rating
+              </div>
+            </div>
+          </div>
+
+          {/* Political Lean Slider */}
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid #eee" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5, color: "#555" }}>
+              Political Lean — This Article
+            </div>
+            <div style={{ position: "relative", height: 6, background: "linear-gradient(to right, #2196f3, #9c27b0, #f44336)", borderRadius: 3 }}>
+              <div style={{
+                position: "absolute", top: -5, width: 16, height: 16, borderRadius: "50%", background: "#333", border: "2px solid #fff",
+                left: `calc(${report.politicalLeanScore}% - 8px)`,
+                boxShadow: "0 1px 3px rgba(0,0,0,0.3)",
+              }} />
+            </div>
+            <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10, color: "#999", marginTop: 6 }}>
+              <span>Left</span><span>Center</span><span>Right</span>
+            </div>
+          </div>
+
+          {/* Bias Dimensions */}
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid #eee" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5, color: "#555" }}>
+              Bias Dimensions
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              {BIAS_DIMENSION_LABELS.map(({ key, label }) => {
+                const value = report.biasDimensions[key];
+                return (
+                  <div key={key} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    <div style={{ width: 110, fontSize: 12, color: "#444" }}>{label}</div>
+                    <div style={{ flex: 1, height: 8, background: "#eee", borderRadius: 4, overflow: "hidden" }}>
+                      <div style={{
+                        width: `${value}%`, height: "100%", borderRadius: 4,
+                        background: value > 70 ? "#f44336" : value > 40 ? "#ff9800" : "#4caf50",
+                      }} />
+                    </div>
+                    <div style={{ width: 32, fontSize: 11, color: "#666", textAlign: "right" }}>{value}%</div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Flagged Phrases */}
+          <div style={{ padding: "12px 16px", borderBottom: "1px solid #eee" }}>
+            <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 8, textTransform: "uppercase", letterSpacing: 0.5, color: "#555" }}>
+              Flagged Phrases
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {report.flaggedPhrases.map((phrase, i) => (
+                <span key={i} style={{
+                  background: "#fff3e0", border: "1px solid #ffcc80", borderRadius: 12,
+                  padding: "3px 10px", fontSize: 11, color: "#e65100",
+                }}>
+                  {phrase}
+                </span>
+              ))}
+            </div>
+            <div style={{ fontSize: 10, color: "#bbb", marginTop: 6 }}>tap a phrase to highlight</div>
+          </div>
+
+          {/* Bottom Tabs */}
+          <div style={{ borderTop: "1px solid #eee", marginTop: "auto" }}>
+            <div style={{ display: "flex" }}>
+              {([
+                { id: "summary" as Tab, label: "AI\nsummary" },
+                { id: "coverage" as Tab, label: "Coverage\ncompare" },
+                { id: "history" as Tab, label: "My\nhistory" },
+              ]).map((tab) => (
+                <button
+                  key={tab.id}
+                  onClick={() => setActiveTab(tab.id)}
+                  style={{
+                    flex: 1, padding: "10px 0", fontSize: 11, textAlign: "center",
+                    background: activeTab === tab.id ? "#f5f5f5" : "#fff",
+                    border: "none", borderTop: activeTab === tab.id ? "2px solid #1976d2" : "2px solid transparent",
+                    cursor: "pointer", fontWeight: activeTab === tab.id ? 600 : 400,
+                    color: activeTab === tab.id ? "#1976d2" : "#999",
+                    whiteSpace: "pre-line", lineHeight: 1.3,
+                  }}
+                >
+                  {tab.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Tab Content */}
+            <div style={{ padding: "12px 16px", minHeight: 80 }}>
+              {activeTab === "summary" && (
+                <div>
+                  <div style={{ fontSize: 13, lineHeight: 1.5, color: "#333" }}>
+                    {renderHighlightedSummary(report.summary.text, report.summary.highlights)}
+                  </div>
+                </div>
+              )}
+              {activeTab === "coverage" && (
+                <div style={{ fontSize: 12, color: "#999", textAlign: "center", padding: 20 }}>
+                  Coverage comparison coming soon
+                </div>
+              )}
+              {activeTab === "history" && (
+                <div style={{ fontSize: 12, color: "#999", textAlign: "center", padding: 20 }}>
+                  Analysis history coming soon
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>
+  );
+}
+
+function renderHighlightedSummary(text: string, highlights: ArticleBiasReport["summary"]["highlights"]) {
+  if (!highlights.length) return text;
+
+  const HIGHLIGHT_COLORS: Record<string, string> = {
+    "charged-language": "#fff3e0",
+    "source-count": "#e3f2fd",
+    "omission": "#fce4ec",
+    "framing": "#f3e5f5",
+  };
+
+  // Build segments
+  type Segment = { text: string; highlight?: ArticleBiasReport["summary"]["highlights"][number] };
+  const segments: Segment[] = [];
+  let remaining = text;
+
+  // Sort highlights by their position in text
+  const sorted = [...highlights]
+    .map((h) => ({ ...h, index: text.indexOf(h.phrase) }))
+    .filter((h) => h.index >= 0)
+    .sort((a, b) => a.index - b.index);
+
+  let cursor = 0;
+  for (const h of sorted) {
+    if (h.index < cursor) continue;
+    if (h.index > cursor) {
+      segments.push({ text: remaining.slice(0, h.index - cursor) });
+    }
+    segments.push({ text: h.phrase, highlight: h });
+    cursor = h.index + h.phrase.length;
+    remaining = text.slice(cursor);
+  }
+  if (remaining) segments.push({ text: remaining });
+
+  return segments.map((seg, i) =>
+    seg.highlight ? (
+      <span
+        key={i}
+        title={seg.highlight.detail ?? seg.highlight.kind}
+        style={{
+          background: HIGHLIGHT_COLORS[seg.highlight.kind] ?? "#fff9c4",
+          borderRadius: 2,
+          padding: "1px 2px",
+          cursor: "help",
+        }}
+      >
+        {seg.text}
+      </span>
+    ) : (
+      <span key={i}>{seg.text}</span>
+    )
   );
 }
 
