@@ -1,94 +1,15 @@
 import { useEffect, useRef, useState } from "react";
-import { CreateMLCEngine, type MLCEngine, type InitProgressReport } from "@mlc-ai/web-llm";
-
-const CLOUD_PROVIDERS = [
-  { id: "gemini", label: "Google Gemini", endpoint: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent" },
-  { id: "claude", label: "Anthropic Claude", endpoint: "https://api.anthropic.com/v1/messages" },
-  { id: "chatgpt", label: "OpenAI ChatGPT", endpoint: "https://api.openai.com/v1/chat/completions" },
-] as const;
-
-type CloudProviderId = (typeof CLOUD_PROVIDERS)[number]["id"];
-
-const LOCAL_MODELS = [
-  { id: "SmolLM2-360M-Instruct-q4f16_1-MLC", label: "SmolLM2 360M (fastest)" },
-  { id: "SmolLM2-1.7B-Instruct-q4f16_1-MLC", label: "SmolLM2 1.7B (balanced)" },
-  { id: "Llama-3.2-1B-Instruct-q4f16_1-MLC", label: "Llama 3.2 1B" },
-  { id: "Llama-3.2-3B-Instruct-q4f16_1-MLC", label: "Llama 3.2 3B (best quality)" },
-] as const;
-
-type LocalModelId = (typeof LOCAL_MODELS)[number]["id"];
-type ProviderMode = "cloud" | "local";
-
-const SYSTEM_PROMPT = "You are a helpful assistant. Summarize the following web page content concisely in a few paragraphs. Focus on the key points.";
-
-// --- Cloud summarization helpers ---
-
-async function summarizeWithGemini(apiKey: string, content: string): Promise<string> {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system_instruction: { parts: [{ text: SYSTEM_PROMPT }] },
-        contents: [{ parts: [{ text: content }] }],
-      }),
-    }
-  );
-  if (!res.ok) throw new Error(`Gemini API error: ${res.status} ${await res.text()}`);
-  const data = await res.json();
-  return data.candidates?.[0]?.content?.parts?.[0]?.text ?? "No summary generated.";
-}
-
-async function summarizeWithClaude(apiKey: string, content: string): Promise<string> {
-  const res = await fetch("https://api.anthropic.com/v1/messages", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "anthropic-dangerous-direct-browser-access": "true",
-    },
-    body: JSON.stringify({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 1024,
-      system: SYSTEM_PROMPT,
-      messages: [{ role: "user", content }],
-    }),
-  });
-  if (!res.ok) throw new Error(`Claude API error: ${res.status} ${await res.text()}`);
-  const data = await res.json();
-  return data.content?.[0]?.text ?? "No summary generated.";
-}
-
-async function summarizeWithChatGPT(apiKey: string, content: string): Promise<string> {
-  const res = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: "gpt-4o-mini",
-      messages: [
-        { role: "system", content: SYSTEM_PROMPT },
-        { role: "user", content },
-      ],
-    }),
-  });
-  if (!res.ok) throw new Error(`ChatGPT API error: ${res.status} ${await res.text()}`);
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content ?? "No summary generated.";
-}
-
-// --- Storage types ---
-
-interface StoredState {
-  providerMode?: ProviderMode;
-  selectedCloud?: CloudProviderId;
-  selectedLocal?: LocalModelId;
-  apiKeys?: Record<CloudProviderId, string>;
-}
+import {
+  CLOUD_PROVIDERS,
+  LOCAL_MODELS,
+  type CloudProviderId,
+  type LocalModelId,
+  type ProviderMode,
+} from "./lib/constants";
+import { loadState, saveState } from "./lib/storage";
+import { extractPageContent } from "./lib/pageExtractor";
+import { summarizeWithCloud } from "./lib/cloudProviders";
+import { loadLocalModel, summarizeWithLocal, type MLCEngine } from "./lib/localModel";
 
 function App() {
   const [providerMode, setProviderMode] = useState<ProviderMode>("local");
@@ -119,22 +40,19 @@ function App() {
 
   // Load persisted state
   useEffect(() => {
-    chrome.storage.local.get(
-      ["providerMode", "selectedCloud", "selectedLocal", "apiKeys"],
-      (result: StoredState) => {
-        if (result.providerMode) setProviderMode(result.providerMode);
-        if (result.selectedCloud) setSelectedCloud(result.selectedCloud);
-        if (result.selectedLocal) setSelectedLocal(result.selectedLocal);
-        if (result.apiKeys) setApiKeys(result.apiKeys);
-      }
-    );
+    loadState().then((state) => {
+      if (state.providerMode) setProviderMode(state.providerMode);
+      if (state.selectedCloud) setSelectedCloud(state.selectedCloud);
+      if (state.selectedLocal) setSelectedLocal(state.selectedLocal);
+      if (state.apiKeys) setApiKeys(state.apiKeys);
+    });
   }, []);
 
   // --- Mode switching ---
 
   const handleModeChange = (mode: ProviderMode) => {
     setProviderMode(mode);
-    chrome.storage.local.set({ providerMode: mode });
+    saveState({ providerMode: mode });
     setShowKeyInput(false);
   };
 
@@ -142,7 +60,7 @@ function App() {
 
   const handleCloudChange = (id: CloudProviderId) => {
     setSelectedCloud(id);
-    chrome.storage.local.set({ selectedCloud: id });
+    saveState({ selectedCloud: id });
     if (!apiKeys[id]) {
       setKeyDraft("");
       setShowKeyInput(true);
@@ -156,7 +74,7 @@ function App() {
     if (!trimmed) return;
     const updated = { ...apiKeys, [selectedCloud]: trimmed };
     setApiKeys(updated);
-    chrome.storage.local.set({ apiKeys: updated });
+    saveState({ apiKeys: updated });
     setKeyDraft("");
     setShowKeyInput(false);
   };
@@ -165,21 +83,19 @@ function App() {
 
   const handleLocalChange = (id: LocalModelId) => {
     setSelectedLocal(id);
-    chrome.storage.local.set({ selectedLocal: id });
+    saveState({ selectedLocal: id });
     engineRef.current = null;
     setModelReady(false);
     setModelStatus("");
   };
 
-  const loadModel = async () => {
+  const handleLoadModel = async () => {
     setLoadingModel(true);
     setModelReady(false);
     setError(null);
     try {
-      const engine = await CreateMLCEngine(selectedLocal, {
-        initProgressCallback: (progress: InitProgressReport) => {
-          setModelStatus(progress.text);
-        },
+      const engine = await loadLocalModel(selectedLocal, (progress) => {
+        setModelStatus(progress.text);
       });
       engineRef.current = engine;
       setModelReady(true);
@@ -194,24 +110,14 @@ function App() {
 
   // --- Page extraction ---
 
-  const extractPageContent = async () => {
+  const handleExtractPage = async () => {
     setLoading(true);
     setError(null);
     setPageContent(null);
     setSummary(null);
     try {
-      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (!tab.id) { setError("No active tab found."); setLoading(false); return; }
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: () => ({ title: document.title, url: document.URL, text: document.body.innerText }),
-      });
-      const data = results[0]?.result;
-      if (data) {
-        setPageContent(`Title: ${data.title}\nURL: ${data.url}\n\n${data.text}`);
-      } else {
-        setError("Could not read page content.");
-      }
+      const data = await extractPageContent();
+      setPageContent(`Title: ${data.title}\nURL: ${data.url}\n\n${data.text}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to read page content.");
     } finally {
@@ -221,7 +127,7 @@ function App() {
 
   // --- Summarize ---
 
-  const summarizePage = async () => {
+  const handleSummarize = async () => {
     if (!pageContent) return;
     setSummarizing(true);
     setError(null);
@@ -240,31 +146,14 @@ function App() {
           setSummarizing(false);
           return;
         }
-
-        switch (selectedCloud) {
-          case "gemini":
-            result = await summarizeWithGemini(key, truncated);
-            break;
-          case "claude":
-            result = await summarizeWithClaude(key, truncated);
-            break;
-          case "chatgpt":
-            result = await summarizeWithChatGPT(key, truncated);
-            break;
-        }
+        result = await summarizeWithCloud(selectedCloud, key, truncated);
       } else {
         if (!engineRef.current) {
           setError("Please load a local model first.");
           setSummarizing(false);
           return;
         }
-        const reply = await engineRef.current.chat.completions.create({
-          messages: [
-            { role: "system", content: SYSTEM_PROMPT },
-            { role: "user", content: truncated },
-          ],
-        });
-        result = reply.choices[0]?.message.content ?? "No summary generated.";
+        result = await summarizeWithLocal(engineRef.current, truncated);
       }
 
       setSummary(result);
@@ -335,7 +224,6 @@ function App() {
             ))}
           </div>
 
-          {/* API Key Input */}
           {showKeyInput && (
             <div style={{ marginTop: 8, padding: 8, background: "#fff8e1", borderRadius: 4, border: "1px solid #ffe082" }}>
               <p style={{ margin: "0 0 6px", fontSize: 12 }}>
@@ -355,7 +243,6 @@ function App() {
             </div>
           )}
 
-          {/* Update key button */}
           {apiKeys[selectedCloud] && !showKeyInput && (
             <button
               onClick={() => { setKeyDraft(""); setShowKeyInput(true); }}
@@ -382,7 +269,7 @@ function App() {
           </select>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8 }}>
             <button
-              onClick={loadModel}
+              onClick={handleLoadModel}
               disabled={loadingModel || modelReady}
               style={{ padding: "6px 14px", fontSize: 13, cursor: loadingModel || modelReady ? "default" : "pointer" }}
             >
@@ -399,14 +286,14 @@ function App() {
       {/* Actions */}
       <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
         <button
-          onClick={extractPageContent}
+          onClick={handleExtractPage}
           disabled={loading}
           style={{ flex: 1, padding: "8px 12px", fontSize: 13, cursor: loading ? "wait" : "pointer" }}
         >
           {loading ? "Reading..." : "Read Page"}
         </button>
         <button
-          onClick={summarizePage}
+          onClick={handleSummarize}
           disabled={!canSummarize || summarizing}
           style={{ flex: 1, padding: "8px 12px", fontSize: 13, cursor: !canSummarize || summarizing ? "default" : "pointer" }}
         >
@@ -416,7 +303,6 @@ function App() {
 
       {error && <p style={{ color: "red", margin: "0 0 8px", fontSize: 13 }}>{error}</p>}
 
-      {/* Summary */}
       {summary && (
         <div style={{ marginBottom: 8 }}>
           <h3 style={{ fontSize: 14, margin: "0 0 6px" }}>Summary</h3>
@@ -426,7 +312,6 @@ function App() {
         </div>
       )}
 
-      {/* Raw Page Content */}
       {pageContent && (
         <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
           <h3 style={{ fontSize: 14, margin: "0 0 6px" }}>Page Content</h3>
