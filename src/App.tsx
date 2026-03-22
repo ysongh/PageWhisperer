@@ -10,6 +10,7 @@ import { loadState, saveState } from "./lib/storage";
 import { extractPageContent } from "./lib/pageExtractor";
 import { analyzeWithCloud } from "./lib/cloudProviders";
 import { loadLocalModel, analyzeWithLocal, type MLCEngine } from "./lib/localModel";
+import { saveReport, getReports, type SavedReport } from "./lib/reportStore";
 import type { ArticleBiasReport } from "./lib/types";
 
 type Tab = "summary" | "coverage" | "history";
@@ -56,6 +57,10 @@ function App() {
   const [analyzing, setAnalyzing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+
+  // History state
+  const [history, setHistory] = useState<SavedReport[]>([]);
+  const [loadingHistory, setLoadingHistory] = useState(false);
 
   useEffect(() => {
     loadState().then((state) => {
@@ -158,11 +163,36 @@ function App() {
 
       setReport(result);
       setActiveTab("summary");
+
+      // Save to Supabase in background
+      saveReport(pageData.url, pageData.title, result).catch((e) =>
+        console.warn("Failed to save report:", e)
+      );
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to analyze page content.");
     } finally {
       setAnalyzing(false);
     }
+  };
+
+  const handleTabChange = async (tab: Tab) => {
+    setActiveTab(tab);
+    if (tab === "history") {
+      setLoadingHistory(true);
+      try {
+        const reports = await getReports();
+        setHistory(reports);
+      } catch (err) {
+        console.warn("Failed to load history:", err);
+      } finally {
+        setLoadingHistory(false);
+      }
+    }
+  };
+
+  const handleViewHistoryReport = (saved: SavedReport) => {
+    setReport(saved.report);
+    setActiveTab("summary");
   };
 
   const canAnalyze =
@@ -362,7 +392,7 @@ function App() {
               ]).map((tab) => (
                 <button
                   key={tab.id}
-                  onClick={() => setActiveTab(tab.id)}
+                  onClick={() => handleTabChange(tab.id)}
                   style={{
                     flex: 1, padding: "10px 0", fontSize: 11, textAlign: "center",
                     background: activeTab === tab.id ? "#f5f5f5" : "#fff",
@@ -392,8 +422,35 @@ function App() {
                 </div>
               )}
               {activeTab === "history" && (
-                <div style={{ fontSize: 12, color: "#999", textAlign: "center", padding: 20 }}>
-                  Analysis history coming soon
+                <div>
+                  {loadingHistory && (
+                    <div style={{ fontSize: 12, color: "#999", textAlign: "center", padding: 20 }}>Loading...</div>
+                  )}
+                  {!loadingHistory && history.length === 0 && (
+                    <div style={{ fontSize: 12, color: "#999", textAlign: "center", padding: 20 }}>No analysis history yet</div>
+                  )}
+                  {!loadingHistory && history.map((item) => (
+                    <div
+                      key={item.id}
+                      onClick={() => handleViewHistoryReport(item)}
+                      style={{
+                        padding: "8px 0", borderBottom: "1px solid #f0f0f0", cursor: "pointer",
+                        display: "flex", justifyContent: "space-between", alignItems: "center",
+                      }}
+                    >
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {item.page_title}
+                        </div>
+                        <div style={{ fontSize: 10, color: "#999", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                          {item.page_url}
+                        </div>
+                      </div>
+                      <div style={{ fontSize: 10, color: "#bbb", marginLeft: 8, flexShrink: 0 }}>
+                        {new Date(item.created_at).toLocaleDateString()}
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
